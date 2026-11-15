@@ -2322,9 +2322,23 @@ static void ggml_cann_mul_mat_quant(ggml_backend_cann_context & ctx, ggml_tensor
             acl_tensor_ptr acl_scale_tensor =
                 ggml_cann_create_tensor(scale_offset + batch0 * scale_stride, ACL_FLOAT16, scale_elem_size, scale_ne,
                                         scale_nb, 2, ACL_FORMAT_ND, scale_ne_offset);
-            acl_tensor_ptr acl_output_tensor =
-                ggml_cann_create_tensor((char *) output_buffer + batch1 * output_stride, ACL_FLOAT16, output_elem_size,
-                                        output_ne, output_nb, 2, ACL_FORMAT_ND, output_ne_offset);
+            // A split's slice of output_buffer is strided (extent weight_ne[0],
+            // row stride dst->ne[0]), which this op rejects. Compute into
+            // contiguous scratch and copy the slice into place.
+            size_t               split_out_nb[2] = { output_elem_size, (size_t) output_ne[0] * output_elem_size };
+            ggml_cann_pool_alloc split_out_allocator(ctx.pool());
+
+            acl_tensor_ptr acl_output_tensor;
+            if (split_size > 1) {
+                void * split_out = split_out_allocator.alloc(output_ne[0] * output_ne[1] * output_elem_size);
+                acl_output_tensor =
+                    ggml_cann_create_tensor(split_out, ACL_FLOAT16, output_elem_size, output_ne, split_out_nb, 2);
+            } else {
+                acl_output_tensor =
+                    ggml_cann_create_tensor((char *) output_buffer + batch1 * output_stride, ACL_FLOAT16,
+                                            output_elem_size, output_ne, output_nb, 2, ACL_FORMAT_ND,
+                                            output_ne_offset);
+            }
             int64_t antiquantGroupSize = 0;
             if (src0->ne[0] > QK8_0) {
                 antiquantGroupSize = QK8_0;
@@ -2333,6 +2347,13 @@ static void ggml_cann_mul_mat_quant(ggml_backend_cann_context & ctx, ggml_tensor
                                     acl_scale_tensor.get(), nullptr, nullptr, nullptr, nullptr, antiquantGroupSize,
                                     acl_output_tensor.get());
 
+            if (split_size > 1) {
+                acl_tensor_ptr acl_slice = ggml_cann_create_tensor(
+                    (char *) output_buffer + batch1 * output_stride, ACL_FLOAT16, output_elem_size, output_ne,
+                    output_nb, 2, ACL_FORMAT_ND, output_ne_offset);
+                GGML_CANN_CALL_ACLNN_OP(ctx, InplaceCopy, acl_slice.get(), acl_output_tensor.get());
+            }
+
             // other splits
             for (int64_t split = 1; split < split_size; split++) {
                 weight_ne_offset += weight_elem_size * weight_ne[0] * weight_ne[1];
@@ -2340,7 +2361,10 @@ static void ggml_cann_mul_mat_quant(ggml_backend_cann_context & ctx, ggml_tensor
                     max_elem_size * (split + 1) > src0->ne[1] ? src0->ne[1] - (max_elem_size * split) : max_elem_size;
                 scale_ne_offset += scale_elem_size * scale_ne[0] * scale_ne[1];
                 scale_ne[0] = weight_ne[0];
-                output_ne_offset += output_elem_size * output_ne[0] * output_ne[1];
+                // Advance by rows: output_buffer is strided [dst->ne[0], dst->ne[1]],
+                // so split k starts at row k*max_elem_size. Advancing by a whole
+                // block is only equivalent when dst->ne[1] == 1.
+                output_ne_offset += output_elem_size * output_ne[0];
                 output_ne[0] = weight_ne[0];
 
                 acl_weight_tensor =
@@ -2349,12 +2373,21 @@ static void ggml_cann_mul_mat_quant(ggml_backend_cann_context & ctx, ggml_tensor
                 acl_scale_tensor =
                     ggml_cann_create_tensor(scale_offset + batch0 * scale_stride, ACL_FLOAT16, scale_elem_size,
                                             scale_ne, scale_nb, 2, ACL_FORMAT_ND, scale_ne_offset);
+                // contiguous scratch; a fresh allocator per split, since
+                // ggml_cann_pool_alloc holds exactly one allocation
+                ggml_cann_pool_alloc cur_out_allocator(ctx.pool());
+                void *               split_out = cur_out_allocator.alloc(output_ne[0] * output_ne[1] * output_elem_size);
+                size_t               cur_out_nb[2] = { output_elem_size, (size_t) output_ne[0] * output_elem_size };
                 acl_output_tensor =
-                    ggml_cann_create_tensor((char *) output_buffer + batch1 * output_stride, ACL_FLOAT16,
-                                            output_elem_size, output_ne, output_nb, 2, ACL_FORMAT_ND, output_ne_offset);
+                    ggml_cann_create_tensor(split_out, ACL_FLOAT16, output_elem_size, output_ne, cur_out_nb, 2);
                 GGML_CANN_CALL_ACLNN_OP(ctx, WeightQuantBatchMatmulV2, acl_input_tensor.get(), acl_weight_tensor.get(),
                                         acl_scale_tensor.get(), nullptr, nullptr, nullptr, nullptr, antiquantGroupSize,
                                         acl_output_tensor.get());
+
+                acl_tensor_ptr acl_slice = ggml_cann_create_tensor(
+                    (char *) output_buffer + batch1 * output_stride, ACL_FLOAT16, output_elem_size, output_ne,
+                    output_nb, 2, ACL_FORMAT_ND, output_ne_offset);
+                GGML_CANN_CALL_ACLNN_OP(ctx, InplaceCopy, acl_slice.get(), acl_output_tensor.get());
             }
         }
     }

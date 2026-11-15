@@ -11942,6 +11942,14 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     // testing very large N
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F32, 16, 2105344, 32, {1, 1}, {1, 1}));
 
+    // testing very large M: a backend that caps the number of output rows per
+    // matmul call has to split the output and stitch the pieces back together.
+    // These shapes mirror a large-vocabulary output projection, which is where
+    // a mis-stitched split shows up first. The row counts are chosen so that
+    // the final piece is much smaller than the others.
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32,  65536, 2, 256, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 131072, 4, 256, {1, 1}, {1, 1}));
+
 #if 0
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F16, 16, 8400000, 32, {1, 1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 16, 8400000, 32, {1, 1}, {1, 1}));
