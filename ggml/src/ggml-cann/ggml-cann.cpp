@@ -2452,7 +2452,11 @@ static bool ggml_backend_cann_supports_op(ggml_backend_dev_t dev, const ggml_ten
 #endif
                     case GGML_TYPE_F16:
                     case GGML_TYPE_F32:
-                        return true;
+                        // ggml_cann_mat_mul_fp passes src1 to aclnnMm as `self`,
+                        // which only accepts a float tensor. A bf16 src1 aborts
+                        // with AclNN_Parameter_Error(EZ1001) instead of being
+                        // declined here, so refuse it rather than claim support.
+                        return op->src[1]->type != GGML_TYPE_BF16;
                     case GGML_TYPE_Q8_0:
                     case GGML_TYPE_Q4_0:
 #ifdef ASCEND_310P
